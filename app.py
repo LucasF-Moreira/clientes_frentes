@@ -15,7 +15,11 @@ REQUIRED_COLS = [
 # Data helpers
 # -----------------------------
 def load_default_df() -> pd.DataFrame:
-    return pd.read_excel("data/Clientes_25-26_frentes_padronizado.xlsx", sheet_name="Brasil_Latam")
+    DEFAULT_FILE = "Clientes_25-26_frentes_padronizado.xlsx"
+    DEFAULT_SHEET = "Brasil_Latam"
+
+def load_default_df() -> pd.DataFrame:
+    return pd.read_excel(DEFAULT_FILE, sheet_name=DEFAULT_SHEET)
 
 def load_uploaded_df(uploaded_file) -> pd.DataFrame:
     return pd.read_excel(uploaded_file, sheet_name="Brasil_Latam")
@@ -272,5 +276,6 @@ df_filtered = df.merge(
     on="Empresa relacionada - Nomes",
     how="inner"
 )
+
 
 st.dataframe(df_filtered, use_container_width=True)
