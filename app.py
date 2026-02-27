@@ -205,7 +205,7 @@ if base_filtered.empty:
 # -----------------------------
 # Visual principal (Treemap)
 # -----------------------------
-st.subheader("Visual principal")
+st.subheader("Clientes por frentes ou produtos")
 st.caption(subtitle)
 
 clients_view = base_filtered.sort_values(value_col, ascending=False).head(top_n).reset_index(drop=True)
@@ -280,3 +280,4 @@ df_filtered = df.merge(
 )
 
 st.dataframe(df_filtered, use_container_width=True)
+
