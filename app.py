@@ -11,18 +11,18 @@ REQUIRED_COLS = [
     "N_produtos_total",
 ]
 
+# ✅ Base padrão na raiz do repositório
+DEFAULT_FILE = "Clientes_25-26_frentes_padronizado.xlsx"
+DEFAULT_SHEET = "Brasil_Latam"
+
 # -----------------------------
 # Data helpers
 # -----------------------------
 def load_default_df() -> pd.DataFrame:
-    DEFAULT_FILE = "Clientes_25-26_frentes_padronizado.xlsx"
-    DEFAULT_SHEET = "Brasil_Latam"
-
-def load_default_df() -> pd.DataFrame:
     return pd.read_excel(DEFAULT_FILE, sheet_name=DEFAULT_SHEET)
 
 def load_uploaded_df(uploaded_file) -> pd.DataFrame:
-    return pd.read_excel(uploaded_file, sheet_name="Brasil_Latam")
+    return pd.read_excel(uploaded_file, sheet_name=DEFAULT_SHEET)
 
 def validate_df(df: pd.DataFrame) -> None:
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
@@ -50,7 +50,9 @@ def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
-    out = df.merge(fr, on="Empresa relacionada - Nomes", how="left").merge(pr, on="Empresa relacionada - Nomes", how="left")
+    out = df.merge(fr, on="Empresa relacionada - Nomes", how="left").merge(
+        pr, on="Empresa relacionada - Nomes", how="left"
+    )
     return out
 
 def client_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -276,6 +278,5 @@ df_filtered = df.merge(
     on="Empresa relacionada - Nomes",
     how="inner"
 )
-
 
 st.dataframe(df_filtered, use_container_width=True)
