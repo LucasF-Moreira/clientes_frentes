@@ -13,7 +13,6 @@ REQUIRED_COLS = [
     "Pedra",
 ]
 
-# ✅ Base padrão na raiz do repositório
 DEFAULT_FILE = "Clientes_25-26_frentes_padronizado.xlsx"
 DEFAULT_SHEET = "Brasil_Latam"
 
@@ -33,8 +32,9 @@ def validate_df(df: pd.DataFrame) -> None:
 
 def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Mantido como estava: recalcula frentes e usa N_produtos_total já presente.
-    (não altera nada além disso)
+    Mantém a lógica existente:
+    - recalcula N_frentes
+    - mantém N_produtos_total como está na base
     """
     df = df.copy()
 
@@ -45,7 +45,6 @@ def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
 
-    # mantém a coluna N_produtos_total já existente (não recalcula aqui)
     pr = (
         df.groupby("Empresa relacionada - Nomes")["N_produtos_total"]
         .max()
@@ -60,13 +59,20 @@ def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
 
 def client_table(df: pd.DataFrame) -> pd.DataFrame:
     """
-    1 linha por cliente
+    1 linha por cliente + (Pedra, Responsável) por cliente
     """
+    def first_non_null(s):
+        s = s.dropna().astype(str)
+        s = [x.strip() for x in s if x.strip() != ""]
+        return s[0] if s else None
+
     out = (
         df.groupby("Empresa relacionada - Nomes")
         .agg(
             N_frentes=("N_frentes_calc", "max"),
             N_produtos=("N_produtos_total_calc", "max"),
+            Pedra=("Pedra", first_non_null),
+            **{"G1 Responsável": ("G1 Responsável", first_non_null)},
         )
         .reset_index()
     )
@@ -76,13 +82,17 @@ def client_table(df: pd.DataFrame) -> pd.DataFrame:
     out = out.dropna(subset=["N_frentes", "N_produtos"])
     out["N_frentes"] = out["N_frentes"].astype(int)
     out["N_produtos"] = out["N_produtos"].astype(int)
+
+    # normaliza Pedra/Responsável vazios para não quebrar visual
+    out["Pedra"] = out["Pedra"].fillna("Sem Pedra")
+    out["G1 Responsável"] = out["G1 Responsável"].fillna("Sem Responsável")
+
     return out
 
 def bar_with_labels(df_counts: pd.DataFrame, xcol: str, ycol: str, xlabel: str):
     fig = px.bar(df_counts, x=xcol, y=ycol, text=ycol)
     fig.update_traces(textposition="outside", cliponaxis=False)
 
-    # Eixo X visível (mais claro)
     fig.update_xaxes(
         visible=True,
         title_text=xlabel,
@@ -90,10 +100,7 @@ def bar_with_labels(df_counts: pd.DataFrame, xcol: str, ycol: str, xlabel: str):
         showgrid=False,
         zeroline=False,
     )
-
-    # Eixo Y escondido (mantém limpo; números já estão nos rótulos)
     fig.update_yaxes(visible=False, showgrid=False, zeroline=False)
-
     fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
     return fig
 
@@ -189,31 +196,25 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Filtro por lista de clientes (global)")
-    all_client_opts = sorted(clients["Empresa relacionada - Nomes"].astype(str).tolist())
+    all_client_opts = sorted(clients["Empresa relacionada - Nomes"].astype(str).unique().tolist())
     st.multiselect(
         "Selecione clientes (opcional)",
-        options=sorted(set(all_client_opts)),
+        options=all_client_opts,
         key="client_list"
     )
 
-    # ✅ NOVO: filtro de responsável (igual ao de cliente)
     st.divider()
     st.subheader("Filtro por responsável (global)")
-    all_resp_opts = sorted(
-        df["G1 Responsável"].dropna().astype(str).unique().tolist()
-    )
+    all_resp_opts = sorted(clients["G1 Responsável"].dropna().astype(str).unique().tolist())
     st.multiselect(
         "Selecione responsável (opcional)",
         options=all_resp_opts,
         key="resp_list"
     )
 
-    # ✅ NOVO: filtro de pedra (igual ao de cliente; organiza o visual por Pedra)
     st.divider()
     st.subheader("Filtro por Pedra (global)")
-    all_pedra_opts = sorted(
-        df["Pedra"].dropna().astype(str).unique().tolist()
-    )
+    all_pedra_opts = sorted(clients["Pedra"].dropna().astype(str).unique().tolist())
     st.multiselect(
         "Selecione Pedra (opcional)",
         options=all_pedra_opts,
@@ -232,66 +233,51 @@ else:
     value_col = "N_produtos"
     subtitle = "Tamanho do bloco = Nº de produtos"
 
-# aplica filtro por cliente (global)
 if st.session_state.client_list:
-    base_filtered = base_filtered[
-        base_filtered["Empresa relacionada - Nomes"].isin(st.session_state.client_list)
-    ].copy()
+    base_filtered = base_filtered[base_filtered["Empresa relacionada - Nomes"].isin(st.session_state.client_list)].copy()
 
-# aplica filtro por responsável (global) — filtra via df (linha) e reflete nos clientes
 if st.session_state.resp_list:
-    allowed_clients = set(
-        df[df["G1 Responsável"].astype(str).isin(st.session_state.resp_list)][
-            "Empresa relacionada - Nomes"
-        ].astype(str).unique().tolist()
-    )
-    base_filtered = base_filtered[
-        base_filtered["Empresa relacionada - Nomes"].astype(str).isin(allowed_clients)
-    ].copy()
+    base_filtered = base_filtered[base_filtered["G1 Responsável"].isin(st.session_state.resp_list)].copy()
 
-# aplica filtro por pedra (global) — filtra via df (linha) e reflete nos clientes
 if st.session_state.pedra_list:
-    allowed_clients = set(
-        df[df["Pedra"].astype(str).isin(st.session_state.pedra_list)][
-            "Empresa relacionada - Nomes"
-        ].astype(str).unique().tolist()
-    )
-    base_filtered = base_filtered[
-        base_filtered["Empresa relacionada - Nomes"].astype(str).isin(allowed_clients)
-    ].copy()
+    base_filtered = base_filtered[base_filtered["Pedra"].isin(st.session_state.pedra_list)].copy()
 
 if base_filtered.empty:
     st.warning("Com esses filtros, não há clientes para exibir. Ajuste a faixa ou as listas.")
     st.stop()
 
 # -----------------------------
-# Visual principal (Treemap) — organizado por Pedra
+# Visual principal (Treemap) — visão original preservada
+# (organizado visualmente por Pedra via ordenação + cor discreta)
 # -----------------------------
 st.subheader("Visual principal")
-st.caption(subtitle + " | Organização: Pedra → Cliente")
+st.caption(subtitle)
 
-# adiciona pedra no nível do cliente (sem mudar lógica do restante)
-cliente_pedra = (
-    df.groupby("Empresa relacionada - Nomes")["Pedra"]
-    .agg(lambda s: next((v for v in s.dropna().astype(str).unique().tolist() if v.strip()), None))
-    .reset_index()
+clients_view = (
+    base_filtered
+    .sort_values(["Pedra", value_col], ascending=[True, False])
+    .head(top_n)
+    .reset_index(drop=True)
 )
-
-clients_view = base_filtered.sort_values(value_col, ascending=False).head(top_n).reset_index(drop=True)
-clients_view = clients_view.merge(cliente_pedra, on="Empresa relacionada - Nomes", how="left")
 
 fig = px.treemap(
     clients_view,
-    path=["Pedra", "Empresa relacionada - Nomes"],
+    path=["Empresa relacionada - Nomes"],  # ✅ mantém visão anterior
     values=value_col,
-    color=value_col,
-    color_continuous_scale="Reds",
-    custom_data=["Empresa relacionada - Nomes", "N_frentes", "N_produtos", "Pedra"],
+    color="Pedra",  # ✅ organiza/agrupa visualmente por Pedra sem quebrar o treemap
+    custom_data=["Empresa relacionada - Nomes", "N_frentes", "N_produtos", "Pedra", "G1 Responsável"],
 )
 
 fig.update_traces(
     textinfo="label+value",
-    hovertemplate="<b>%{customdata[0]}</b><br>Pedra: %{customdata[3]}<br>Frentes: %{customdata[1]}<br>Produtos: %{customdata[2]}<extra></extra>",
+    hovertemplate=(
+        "<b>%{customdata[0]}</b><br>"
+        "Pedra: %{customdata[3]}<br>"
+        "Responsável: %{customdata[4]}<br>"
+        "Frentes: %{customdata[1]}<br>"
+        "Produtos: %{customdata[2]}"
+        "<extra></extra>"
+    ),
 )
 
 fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=520)
@@ -343,19 +329,19 @@ st.divider()
 # -----------------------------
 st.subheader("Tabela (réplica da base)")
 
-# Filtra a base (linhas) pelos clientes finais do recorte
+# filtra linhas da base original pelos clientes filtrados
 df_filtered = df.merge(
     base_filtered[["Empresa relacionada - Nomes"]],
     on="Empresa relacionada - Nomes",
     how="inner"
 )
 
-# Aplica também filtros de responsável/pedra diretamente nas linhas (para consistência total)
+# aplica filtros de responsável/pedra diretamente nas linhas (consistência total)
 if st.session_state.resp_list:
-    df_filtered = df_filtered[df_filtered["G1 Responsável"].astype(str).isin(st.session_state.resp_list)].copy()
+    df_filtered = df_filtered[df_filtered["G1 Responsável"].isin(st.session_state.resp_list)].copy()
 
 if st.session_state.pedra_list:
-    df_filtered = df_filtered[df_filtered["Pedra"].astype(str).isin(st.session_state.pedra_list)].copy()
+    df_filtered = df_filtered[df_filtered["Pedra"].isin(st.session_state.pedra_list)].copy()
 
 st.dataframe(df_filtered, use_container_width=True)
 
