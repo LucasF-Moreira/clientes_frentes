@@ -33,8 +33,8 @@ def validate_df(df: pd.DataFrame) -> None:
 def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
     """
     Mantém a lógica existente:
-    - recalcula N_frentes
-    - mantém N_produtos_total como está na base
+    - Recalcula N_frentes
+    - Mantém N_produtos_total como está na base
     """
     df = df.copy()
 
@@ -83,7 +83,6 @@ def client_table(df: pd.DataFrame) -> pd.DataFrame:
     out["N_frentes"] = out["N_frentes"].astype(int)
     out["N_produtos"] = out["N_produtos"].astype(int)
 
-    # normaliza Pedra/Responsável vazios para não quebrar visual
     out["Pedra"] = out["Pedra"].fillna("Sem Pedra")
     out["G1 Responsável"] = out["G1 Responsável"].fillna("Sem Responsável")
 
@@ -154,7 +153,7 @@ with st.sidebar:
         st.success("Base enviada carregada.")
 
     st.divider()
-    mode = st.radio("Visão do visual:", ["Frentes", "Produtos"], horizontal=True)
+    mode = st.radio("Visão do visual:", ["Frentes", "Produtos", "Pedra"], horizontal=True)
 
 # -----------------------------
 # Data
@@ -166,8 +165,21 @@ if clients.empty:
     st.error("Não há clientes válidos para analisar (verifique a base).")
     st.stop()
 
+# Ranking de pedras (ajuste se sua hierarquia for diferente)
+pedra_rank = {
+    "Diamante": 5,
+    "Ouro": 4,
+    "Rubi": 4,
+    "Prata": 3,
+    "Bronze": 2,
+    "Safira": 2,
+    "Sem Pedra": 1
+}
+clients["Pedra_rank"] = clients["Pedra"].map(pedra_rank).fillna(1)
+
 min_fr, max_fr = int(clients["N_frentes"].min()), int(clients["N_frentes"].max())
 min_pr, max_pr = int(clients["N_produtos"].min()), int(clients["N_produtos"].max())
+min_pe, max_pe = int(clients["Pedra_rank"].min()), int(clients["Pedra_rank"].max())
 
 with st.sidebar:
     st.subheader("Filtros (faixa)")
@@ -178,12 +190,19 @@ with st.sidebar:
             value=(min_fr, max_fr),
             key="range_frentes"
         )
-    else:
+    elif mode == "Produtos":
         metric_range = st.slider(
             "Produtos (de… até…)",
             min_value=min_pr, max_value=max_pr,
             value=(min_pr, max_pr),
             key="range_produtos"
+        )
+    else:
+        metric_range = st.slider(
+            "Pedra (precisão) (de… até…)",
+            min_value=min_pe, max_value=max_pe,
+            value=(min_pe, max_pe),
+            key="range_pedra"
         )
 
     top_n = st.slider(
@@ -222,16 +241,25 @@ with st.sidebar:
     )
 
 # -----------------------------
-# Aplicar filtros (faixa + listas)
+# Aplicar filtros (faixa + listas) + definir métrica/cor
 # -----------------------------
 if mode == "Frentes":
     base_filtered = clients[clients["N_frentes"].between(metric_range[0], metric_range[1])].copy()
     value_col = "N_frentes"
+    color_col = "N_frentes"
     subtitle = "Tamanho do bloco = Nº de frentes"
-else:
+
+elif mode == "Produtos":
     base_filtered = clients[clients["N_produtos"].between(metric_range[0], metric_range[1])].copy()
     value_col = "N_produtos"
+    color_col = "N_produtos"
     subtitle = "Tamanho do bloco = Nº de produtos"
+
+else:  # Pedra
+    base_filtered = clients[clients["Pedra_rank"].between(metric_range[0], metric_range[1])].copy()
+    value_col = "Pedra_rank"
+    color_col = "Pedra_rank"
+    subtitle = "Tamanho do bloco = Precisão da pedra"
 
 if st.session_state.client_list:
     base_filtered = base_filtered[base_filtered["Empresa relacionada - Nomes"].isin(st.session_state.client_list)].copy()
@@ -247,8 +275,8 @@ if base_filtered.empty:
     st.stop()
 
 # -----------------------------
-# Visual principal (Treemap) — visão original preservada
-# (organizado visualmente por Pedra via ordenação + cor discreta)
+# Visual principal (Treemap) — visão preservada (por cliente)
+# cores douradas por intensidade da métrica
 # -----------------------------
 st.subheader("Visual principal")
 st.caption(subtitle)
@@ -260,11 +288,20 @@ clients_view = (
     .reset_index(drop=True)
 )
 
+gold_scale = [
+    "#FFF7CC",  # dourado claro
+    "#FFE08A",
+    "#FFD24D",
+    "#FFC000",
+    "#D4A017"   # dourado intenso
+]
+
 fig = px.treemap(
     clients_view,
-    path=["Empresa relacionada - Nomes"],  # ✅ mantém visão anterior
+    path=["Empresa relacionada - Nomes"],
     values=value_col,
-    color="Pedra",  # ✅ organiza/agrupa visualmente por Pedra sem quebrar o treemap
+    color=color_col,
+    color_continuous_scale=gold_scale,
     custom_data=["Empresa relacionada - Nomes", "N_frentes", "N_produtos", "Pedra", "G1 Responsável"],
 )
 
@@ -344,4 +381,5 @@ if st.session_state.pedra_list:
     df_filtered = df_filtered[df_filtered["Pedra"].isin(st.session_state.pedra_list)].copy()
 
 st.dataframe(df_filtered, use_container_width=True)
+
 
