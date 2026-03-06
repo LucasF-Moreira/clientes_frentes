@@ -32,11 +32,6 @@ def validate_df(df: pd.DataFrame) -> None:
         raise ValueError(f"Colunas obrigatórias ausentes: {missing}")
 
 def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Mantém a lógica existente:
-    - Recalcula N_frentes
-    - Mantém N_produtos_total como está na base
-    """
     df = df.copy()
 
     fr = (
@@ -59,9 +54,6 @@ def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def client_table(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    1 linha por cliente + (Pedra, Responsável, Farol) por cliente
-    """
     def first_non_null(s):
         s = s.dropna().astype(str)
         s = [x.strip() for x in s if x.strip() != ""]
@@ -117,6 +109,10 @@ if "df_cached" not in st.session_state:
 if "client_list" not in st.session_state:
     st.session_state.client_list = []
 
+# NOVO
+if "client_exclude_list" not in st.session_state:
+    st.session_state.client_exclude_list = []
+
 if "resp_list" not in st.session_state:
     st.session_state.resp_list = []
 
@@ -130,7 +126,7 @@ if "farol_list" not in st.session_state:
 # Header
 # -----------------------------
 st.title("CT - Entregas - Clientes por frentes / produtos — Ciclo 25–26")
-st.caption("KPIs + indicadores + tabela. Use os filtros para recortes por cliente/responsável/pedra.")
+st.caption("KPIs + indicadores + tabela. Use os filtros para recortes.")
 
 # -----------------------------
 # Sidebar
@@ -145,6 +141,7 @@ with st.sidebar:
         validate_df(df0)
         st.session_state.df_cached = ensure_metrics(df0)
         st.session_state.client_list = []
+        st.session_state.client_exclude_list = []
         st.session_state.resp_list = []
         st.session_state.pedra_list = []
         st.session_state.farol_list = []
@@ -155,6 +152,7 @@ with st.sidebar:
         validate_df(dfu)
         st.session_state.df_cached = ensure_metrics(dfu)
         st.session_state.client_list = []
+        st.session_state.client_exclude_list = []
         st.session_state.resp_list = []
         st.session_state.pedra_list = []
         st.session_state.farol_list = []
@@ -170,10 +168,10 @@ df = st.session_state.df_cached
 clients = client_table(df)
 
 if clients.empty:
-    st.error("Não há clientes válidos para analisar (verifique a base).")
+    st.error("Não há clientes válidos para analisar.")
     st.stop()
 
-# Ranking de pedras (ajuste se sua hierarquia for diferente)
+# ranking pedras
 pedra_rank = {
     "Diamante": 5,
     "Ouro": 4,
@@ -190,122 +188,97 @@ min_pr, max_pr = int(clients["N_produtos"].min()), int(clients["N_produtos"].max
 min_pe, max_pe = int(clients["Pedra_rank"].min()), int(clients["Pedra_rank"].max())
 
 with st.sidebar:
+
     st.subheader("Filtros (faixa)")
     if mode == "Frentes":
-        metric_range = st.slider(
-            "Frentes (de… até…)",
-            min_value=min_fr, max_value=max_fr,
-            value=(min_fr, max_fr),
-            key="range_frentes"
-        )
+        metric_range = st.slider("Frentes", min_fr, max_fr, (min_fr, max_fr))
     elif mode == "Produtos":
-        metric_range = st.slider(
-            "Produtos (de… até…)",
-            min_value=min_pr, max_value=max_pr,
-            value=(min_pr, max_pr),
-            key="range_produtos"
-        )
+        metric_range = st.slider("Produtos", min_pr, max_pr, (min_pr, max_pr))
     else:
-        metric_range = st.slider(
-            "Pedra (precisão) (de… até…)",
-            min_value=min_pe, max_value=max_pe,
-            value=(min_pe, max_pe),
-            key="range_pedra"
-        )
+        metric_range = st.slider("Pedra", min_pe, max_pe, (min_pe, max_pe))
 
-    top_n = st.slider(
-        "Top N clientes no visual",
-        min_value=10,
-        max_value=min(200, len(clients)),
-        value=min(60, len(clients)),
-        key="top_n"
-    )
+    top_n = st.slider("Top N clientes", 10, min(200, len(clients)), min(60, len(clients)))
 
     st.divider()
-    st.subheader("Filtro por lista de clientes (global)")
+    st.subheader("Filtro por clientes")
     all_client_opts = sorted(clients["Empresa relacionada - Nomes"].astype(str).unique().tolist())
+    st.multiselect("Selecionar clientes", options=all_client_opts, key="client_list")
+
+    # NOVO
+    st.subheader("Filtro inverso por clientes (remover da visão)")
     st.multiselect(
-        "Selecione clientes (opcional)",
+        "Clientes a remover",
         options=all_client_opts,
-        key="client_list"
+        key="client_exclude_list"
     )
 
     st.divider()
-    st.subheader("Filtro por responsável (global)")
+    st.subheader("Filtro por responsável")
     all_resp_opts = sorted(clients["G1 Responsável"].dropna().astype(str).unique().tolist())
-    st.multiselect(
-        "Selecione responsável (opcional)",
-        options=all_resp_opts,
-        key="resp_list"
-    )
+    st.multiselect("Responsável", options=all_resp_opts, key="resp_list")
 
     st.divider()
-    st.subheader("Filtro por Pedra (global)")
+    st.subheader("Filtro por Pedra")
     all_pedra_opts = sorted(clients["Pedra"].dropna().astype(str).unique().tolist())
-    st.multiselect(
-        "Selecione Pedra (opcional)",
-        options=all_pedra_opts,
-        key="pedra_list"
-    )
+    st.multiselect("Pedra", options=all_pedra_opts, key="pedra_list")
 
     st.divider()
-    st.subheader("Filtro por Farol (global)")
+    st.subheader("Filtro por Farol")
     all_farol_opts = sorted(clients["Farol"].dropna().astype(str).unique().tolist())
-    st.multiselect(
-        "Selecione Farol (opcional)",
-        options=all_farol_opts,
-        key="farol_list"
-    )
+    st.multiselect("Farol", options=all_farol_opts, key="farol_list")
 
 # -----------------------------
-# Aplicar filtros (faixa + listas) + definir métrica/cor
+# Aplicar filtros
 # -----------------------------
 if mode == "Frentes":
     base_filtered = clients[clients["N_frentes"].between(metric_range[0], metric_range[1])].copy()
     value_col = "N_frentes"
-    color_col = "N_frentes"
-    subtitle = "Tamanho do bloco = Nº de frentes"
-
 elif mode == "Produtos":
     base_filtered = clients[clients["N_produtos"].between(metric_range[0], metric_range[1])].copy()
     value_col = "N_produtos"
-    color_col = "N_produtos"
-    subtitle = "Tamanho do bloco = Nº de produtos"
-
-else:  # Pedra
+else:
     base_filtered = clients[clients["Pedra_rank"].between(metric_range[0], metric_range[1])].copy()
     value_col = "Pedra_rank"
-    color_col = "Pedra_rank"
-    subtitle = "Tamanho do bloco = Precisão da pedra"
 
 if st.session_state.client_list:
-    base_filtered = base_filtered[base_filtered["Empresa relacionada - Nomes"].isin(st.session_state.client_list)].copy()
+    base_filtered = base_filtered[
+        base_filtered["Empresa relacionada - Nomes"].isin(st.session_state.client_list)
+    ]
+
+# NOVO filtro inverso
+if st.session_state.client_exclude_list:
+    base_filtered = base_filtered[
+        ~base_filtered["Empresa relacionada - Nomes"].isin(st.session_state.client_exclude_list)
+    ]
 
 if st.session_state.resp_list:
-    base_filtered = base_filtered[base_filtered["G1 Responsável"].isin(st.session_state.resp_list)].copy()
+    base_filtered = base_filtered[
+        base_filtered["G1 Responsável"].isin(st.session_state.resp_list)
+    ]
 
 if st.session_state.pedra_list:
-    base_filtered = base_filtered[base_filtered["Pedra"].isin(st.session_state.pedra_list)].copy()
+    base_filtered = base_filtered[
+        base_filtered["Pedra"].isin(st.session_state.pedra_list)
+    ]
 
 if st.session_state.farol_list:
-    base_filtered = base_filtered[base_filtered["Farol"].isin(st.session_state.farol_list)].copy()
+    base_filtered = base_filtered[
+        base_filtered["Farol"].isin(st.session_state.farol_list)
+    ]
 
 if base_filtered.empty:
-    st.warning("Com esses filtros, não há clientes para exibir. Ajuste a faixa ou as listas.")
+    st.warning("Nenhum cliente encontrado com esses filtros.")
     st.stop()
 
 # -----------------------------
-# Visual principal (Treemap) — visão preservada (por cliente)
-# cores azuis por intensidade da métrica
+# Treemap
 # -----------------------------
 st.subheader("Visual principal")
-st.caption(subtitle)
 
 clients_view = (
     base_filtered
     .sort_values(["Pedra", value_col], ascending=[True, False])
     .head(top_n)
-    .reset_index(drop=True)
 )
 
 blue_scale = [
@@ -320,7 +293,7 @@ fig = px.treemap(
     clients_view,
     path=["Empresa relacionada - Nomes"],
     values=value_col,
-    color=color_col,
+    color=value_col,
     color_continuous_scale=blue_scale,
     custom_data=["Empresa relacionada - Nomes", "N_frentes", "N_produtos", "Pedra", "G1 Responsável"],
 )
@@ -337,7 +310,6 @@ fig.update_traces(
     ),
 )
 
-fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=520)
 st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
@@ -350,61 +322,27 @@ st.subheader("KPIs")
 total_clients = base_filtered.shape[0]
 clients_2p_frentes = int((base_filtered["N_frentes"] >= 2).sum())
 clients_2p_produtos = int((base_filtered["N_produtos"] >= 2).sum())
-max_fr = int(base_filtered["N_frentes"].max()) if total_clients else 0
-max_pr = int(base_filtered["N_produtos"].max()) if total_clients else 0
+max_fr = int(base_filtered["N_frentes"].max())
+max_pr = int(base_filtered["N_produtos"].max())
 
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Clientes (no recorte)", f"{total_clients}")
-k2.metric("Clientes com ≥2 frentes", f"{clients_2p_frentes}", f"{clients_2p_frentes/total_clients:.0%}" if total_clients else None)
-k3.metric("Clientes com ≥2 produtos", f"{clients_2p_produtos}", f"{clients_2p_produtos/total_clients:.0%}" if total_clients else None)
-k4.metric("Máximos no recorte", f"{max_fr} frentes | {max_pr} produtos")
-
-st.divider()
-
-# -----------------------------
-# Indicadores
-# -----------------------------
-st.subheader("Indicadores")
-
-cA, cB = st.columns(2)
-with cA:
-    st.markdown("**Distribuição: nº de frentes por cliente**")
-    fr_dist = base_filtered["N_frentes"].value_counts().sort_index().reset_index()
-    fr_dist.columns = ["N_frentes", "Clientes"]
-    st.plotly_chart(bar_with_labels(fr_dist, "N_frentes", "Clientes", "Nº de frentes"), use_container_width=True)
-
-with cB:
-    st.markdown("**Distribuição: nº de produtos por cliente**")
-    pr_dist = base_filtered["N_produtos"].value_counts().sort_index().reset_index()
-    pr_dist.columns = ["N_produtos", "Clientes"]
-    st.plotly_chart(bar_with_labels(pr_dist, "N_produtos", "Clientes", "Nº de produtos"), use_container_width=True)
+k1.metric("Clientes", total_clients)
+k2.metric("Clientes ≥2 frentes", clients_2p_frentes)
+k3.metric("Clientes ≥2 produtos", clients_2p_produtos)
+k4.metric("Máximo", f"{max_fr} frentes | {max_pr} produtos")
 
 st.divider()
 
 # -----------------------------
 # Tabela
 # -----------------------------
-st.subheader("Tabela (réplica da base)")
+st.subheader("Tabela")
 
-# filtra linhas da base original pelos clientes filtrados
 df_filtered = df.merge(
     base_filtered[["Empresa relacionada - Nomes"]],
     on="Empresa relacionada - Nomes",
     how="inner"
 )
 
-# aplica filtros de responsável/pedra/farol diretamente nas linhas (consistência total)
-if st.session_state.resp_list:
-    df_filtered = df_filtered[df_filtered["G1 Responsável"].isin(st.session_state.resp_list)].copy()
-
-if st.session_state.pedra_list:
-    df_filtered = df_filtered[df_filtered["Pedra"].isin(st.session_state.pedra_list)].copy()
-
-if st.session_state.farol_list:
-    df_filtered = df_filtered[df_filtered["Farol"].isin(st.session_state.farol_list)].copy()
-
 st.dataframe(df_filtered, use_container_width=True)
-
-
-
 
