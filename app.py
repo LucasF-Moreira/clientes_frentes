@@ -1,3 +1,4 @@
+```python
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -11,6 +12,7 @@ REQUIRED_COLS = [
     "N_produtos_total",
     "G1 Responsável",
     "Pedra",
+    "Farol",
 ]
 
 DEFAULT_FILE = "Clientes_25-26_frentes_padronizado.xlsx"
@@ -59,7 +61,7 @@ def ensure_metrics(df: pd.DataFrame) -> pd.DataFrame:
 
 def client_table(df: pd.DataFrame) -> pd.DataFrame:
     """
-    1 linha por cliente + (Pedra, Responsável) por cliente
+    1 linha por cliente + (Pedra, Responsável, Farol) por cliente
     """
     def first_non_null(s):
         s = s.dropna().astype(str)
@@ -72,6 +74,7 @@ def client_table(df: pd.DataFrame) -> pd.DataFrame:
             N_frentes=("N_frentes_calc", "max"),
             N_produtos=("N_produtos_total_calc", "max"),
             Pedra=("Pedra", first_non_null),
+            Farol=("Farol", first_non_null),
             **{"G1 Responsável": ("G1 Responsável", first_non_null)},
         )
         .reset_index()
@@ -85,6 +88,7 @@ def client_table(df: pd.DataFrame) -> pd.DataFrame:
 
     out["Pedra"] = out["Pedra"].fillna("Sem Pedra")
     out["G1 Responsável"] = out["G1 Responsável"].fillna("Sem Responsável")
+    out["Farol"] = out["Farol"].fillna("Sem Farol")
 
     return out
 
@@ -120,6 +124,9 @@ if "resp_list" not in st.session_state:
 if "pedra_list" not in st.session_state:
     st.session_state.pedra_list = []
 
+if "farol_list" not in st.session_state:
+    st.session_state.farol_list = []
+
 # -----------------------------
 # Header
 # -----------------------------
@@ -141,6 +148,7 @@ with st.sidebar:
         st.session_state.client_list = []
         st.session_state.resp_list = []
         st.session_state.pedra_list = []
+        st.session_state.farol_list = []
         st.success("Base padrão carregada.")
 
     if uploaded is not None and colB.button("Usar base enviada"):
@@ -150,6 +158,7 @@ with st.sidebar:
         st.session_state.client_list = []
         st.session_state.resp_list = []
         st.session_state.pedra_list = []
+        st.session_state.farol_list = []
         st.success("Base enviada carregada.")
 
     st.divider()
@@ -240,6 +249,15 @@ with st.sidebar:
         key="pedra_list"
     )
 
+    st.divider()
+    st.subheader("Filtro por Farol (global)")
+    all_farol_opts = sorted(clients["Farol"].dropna().astype(str).unique().tolist())
+    st.multiselect(
+        "Selecione Farol (opcional)",
+        options=all_farol_opts,
+        key="farol_list"
+    )
+
 # -----------------------------
 # Aplicar filtros (faixa + listas) + definir métrica/cor
 # -----------------------------
@@ -270,13 +288,16 @@ if st.session_state.resp_list:
 if st.session_state.pedra_list:
     base_filtered = base_filtered[base_filtered["Pedra"].isin(st.session_state.pedra_list)].copy()
 
+if st.session_state.farol_list:
+    base_filtered = base_filtered[base_filtered["Farol"].isin(st.session_state.farol_list)].copy()
+
 if base_filtered.empty:
     st.warning("Com esses filtros, não há clientes para exibir. Ajuste a faixa ou as listas.")
     st.stop()
 
 # -----------------------------
 # Visual principal (Treemap) — visão preservada (por cliente)
-# cores douradas por intensidade da métrica
+# cores azuis por intensidade da métrica
 # -----------------------------
 st.subheader("Visual principal")
 st.caption(subtitle)
@@ -288,12 +309,12 @@ clients_view = (
     .reset_index(drop=True)
 )
 
-gold_scale = [
-    "#FFF7CC",  # dourado claro
-    "#FFE08A",
-    "#FFD24D",
-    "#FFC000",
-    "#D4A017"   # dourado intenso
+blue_scale = [
+    "#EAF3FF",
+    "#B9D7FF",
+    "#6FAEFF",
+    "#2F7DE1",
+    "#0B4F9C"
 ]
 
 fig = px.treemap(
@@ -301,7 +322,7 @@ fig = px.treemap(
     path=["Empresa relacionada - Nomes"],
     values=value_col,
     color=color_col,
-    color_continuous_scale=gold_scale,
+    color_continuous_scale=blue_scale,
     custom_data=["Empresa relacionada - Nomes", "N_frentes", "N_produtos", "Pedra", "G1 Responsável"],
 )
 
@@ -373,13 +394,18 @@ df_filtered = df.merge(
     how="inner"
 )
 
-# aplica filtros de responsável/pedra diretamente nas linhas (consistência total)
+# aplica filtros de responsável/pedra/farol diretamente nas linhas (consistência total)
 if st.session_state.resp_list:
     df_filtered = df_filtered[df_filtered["G1 Responsável"].isin(st.session_state.resp_list)].copy()
 
 if st.session_state.pedra_list:
     df_filtered = df_filtered[df_filtered["Pedra"].isin(st.session_state.pedra_list)].copy()
 
+if st.session_state.farol_list:
+    df_filtered = df_filtered[df_filtered["Farol"].isin(st.session_state.farol_list)].copy()
+
 st.dataframe(df_filtered, use_container_width=True)
+```
+
 
 
