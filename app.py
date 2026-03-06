@@ -1,4 +1,3 @@
-```python
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -405,7 +404,7 @@ if st.session_state.farol_list:
     df_filtered = df_filtered[df_filtered["Farol"].isin(st.session_state.farol_list)].copy()
 
 st.dataframe(df_filtered, use_container_width=True)
-```
+
 
 
 
