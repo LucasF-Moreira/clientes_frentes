@@ -1,0 +1,1417 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Alocação de Analistas — Cia de Talentos</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.38.3/lib/msal-browser.min.js"></script>
+<script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family:'Segoe UI',sans-serif; background:#f8fafc; }
+  .fade-in { animation:fadeIn .25s ease; }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(3px)} to{opacity:1;transform:none} }
+  .cell-green  { background:#dcfce7; color:#166534; }
+  .cell-yellow { background:#fef9c3; color:#854d0e; }
+  .cell-red    { background:#fee2e2; color:#991b1b; }
+  .cell-empty  { background:#f1f5f9; color:#cbd5e1; }
+  th { position:sticky; top:0; z-index:10; }
+  .scroll-table { overflow-x:auto; }
+  .modal-overlay { position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:50;display:flex;align-items:center;justify-content:center; }
+  input[type=text],input[type=number],input[type=date],select { outline:none; }
+  .slide-down { animation:slideDown .3s ease; }
+  @keyframes slideDown { from{transform:translateY(-100%)} to{transform:none} }
+  input[type=number]::-webkit-inner-spin-button { opacity:.5; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useMemo, useCallback, useRef } = React;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  CONFIGURAÇÃO DO ADMINISTRADOR — preencher UMA VEZ e distribuir o arquivo
+//  Passo 1: portal.azure.com → Azure Active Directory → Registros de aplicativo
+//  Passo 2: Novo registro → URI de redirecionamento: SPA → URL onde o arquivo será acessado
+//  Passo 3: Permissões de API → SharePoint → AllSites.ReadWrite → Consentimento de admin
+// ═══════════════════════════════════════════════════════════════════════════════
+const APP_CONFIG = {
+  clientId: 'c6dbe555-ff7c-42c7-a354-f08a2e047635',
+  tenantId: 'ac8f4ef1-af60-46a9-ab7f-189ccdb79e4c',
+};
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+const PHASES = [
+  { key:'Planejamento',    label:'Planejamento',    group:'Planejamento' },
+  { key:'Inscricao',       label:'Inscrições',       group:'Inscrições' },
+  { key:'Etapa_1',         label:'Etapa 1',          group:'Etapas de Avaliação' },
+  { key:'Etapa_2',         label:'Etapa 2',          group:'Etapas de Avaliação' },
+  { key:'Etapa_3',         label:'Etapa 3',          group:'Etapas de Avaliação' },
+  { key:'Etapa_4',         label:'Etapa 4',          group:'Etapas de Avaliação' },
+  { key:'Etapa_5',         label:'Etapa 5',          group:'Etapas de Avaliação' },
+  { key:'Relatorio_Final', label:'Relatório Final',  group:'Relatório Final' },
+];
+const MAX_ANALYSTS   = 8;
+const ANALYST_KEYS   = Array.from({length:MAX_ANALYSTS},(_,i)=>`Analista_${i+1}`);
+const SP_SITE_URL    = 'https://ciadetalentos-my.sharepoint.com/personal/automacoes_fpa_ciadetalentos_com';
+const SP_LIST_NAME   = 'List_Pulse';
+const SP_SCOPE       = 'https://ciadetalentos-my.sharepoint.com/.default';
+const SP_ENTITY      = 'SP.Data.List_PulseListItem';
+const PLACEHOLDER    = '.Selecione um(a) Talent';
+const LS_KEY         = 'ct_aloc_v4';
+const SP_SELECT      = [
+  'Id','indice','Cliente','Status_Programa','Nome_Programa',
+  ...ANALYST_KEYS,
+  ...PHASES.flatMap(ph=>[`Inicio_${ph.key}`,`Fim_${ph.key}`,`Analista_${ph.key}_PCT`]),
+].join(',');
+
+// ─── Date Helpers (always LOCAL midnight — never UTC) ──────────────────────────
+function parseSPDate(v) {
+  if (!v) return null;
+  const s = String(v).trim();
+  if (!s) return null;
+  if (s.includes('T')) {
+    const [y,m,d] = s.split('T')[0].split('-').map(Number);
+    return new Date(y, m-1, d);
+  }
+  if (s.includes('/')) {
+    const [d,m,y] = s.split(' ')[0].split('/').map(Number);
+    if (y&&m&&d) return new Date(y, m-1, d);
+  }
+  if (s.includes('-')) {
+    const [y,m,d] = s.split('-').map(Number);
+    return new Date(y, m-1, d);
+  }
+  return null;
+}
+function fmtDateForInput(raw) {          // → YYYY-MM-DD for <input type="date">
+  const d = parseSPDate(raw);
+  if (!d||isNaN(d)) return '';
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function fmtDateForSP(raw) {             // → "YYYY-MM-DDTHH:mm:ssZ" (avoids UTC shift)
+  const d = parseSPDate(raw);
+  if (!d||isNaN(d)) return null;
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}T00:00:00Z`;
+}
+function fmtDateDisplay(raw) {
+  const d = parseSPDate(raw);
+  if (!d||isNaN(d)) return '—';
+  return `${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
+}
+function monthKey(date) {
+  const d = typeof date==='string' ? parseSPDate(date) : date;
+  if (!d||isNaN(d)) return null;
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
+}
+function monthLabel(mk) {
+  if (!mk) return '';
+  const [y,m] = mk.split('-');
+  return ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'][parseInt(m)-1]+'/'+y;
+}
+function rangeMonths(start, end) {
+  if (!start||!end) return [];
+  const [sy,sm] = start.split('-').map(Number);
+  const [ey,em] = end.split('-').map(Number);
+  if (!sy||!sm||!ey||!em) return [];
+  const s = new Date(sy, sm-1, 1);
+  const e = new Date(ey, em-1, 1);
+  const out = []; let cur = new Date(s);
+  while (cur<=e && out.length<36) {
+    out.push(`${cur.getFullYear()}-${String(cur.getMonth()+1).padStart(2,'0')}`);
+    cur.setMonth(cur.getMonth()+1);
+  }
+  return out;
+}
+function daysOverlapInMonth(startRaw, endRaw, mk) {
+  if (!startRaw||!endRaw||!mk) return 0;
+  const [y,m] = mk.split('-').map(Number);
+  const mS = new Date(y,m-1,1), mE = new Date(y,m,0);
+  const phS = parseSPDate(startRaw), phE = parseSPDate(endRaw);
+  if (!phS||!phE) return 0;
+  const oS = phS>mS?phS:mS, oE = phE<mE?phE:mE;
+  return Math.max(0, Math.round((oE-oS)/(864e5))+1);
+}
+
+// ─── PCT Helpers ──────────────────────────────────────────────────────────────
+function parsePct(v) {
+  if (!v&&v!==0) return 0;
+  const s = String(v).trim();
+  if (!s||s==='0') return 0;
+  if (s.includes('%')) return parseFloat(s.replace('%','').replace(',','.')) || 0;
+  return (parseFloat(s.replace(',','.')) || 0) * 100;
+}
+function pctToSP(pct) { return pct/100; }
+function totalPhasePct(phase) { return (phase?.pcts||[]).reduce((a,b)=>a+(b||0), 0); }
+
+// ─── Parse SharePoint Item → internal model ───────────────────────────────────
+// phases[key].pcts = number[] (one per analyst, same order as analysts[])
+function parseSPItem(item) {
+  const analysts = ANALYST_KEYS
+    .map(k=>(item[k]||'').trim())
+    .filter(a=>a&&a!==PLACEHOLDER);
+  const n = Math.max(analysts.length, 1);
+  const phases = {};
+  PHASES.forEach(ph=>{
+    const tot      = parsePct(item[`Analista_${ph.key}_PCT`]);
+    const perEach  = tot>0 ? Math.round(tot/n) : 0;
+    phases[ph.key] = {
+      start: item[`Inicio_${ph.key}`]||null,
+      end:   item[`Fim_${ph.key}`]||null,
+      pcts:  analysts.map(()=>perEach),   // equal split — user can adjust
+    };
+  });
+  return {
+    id:     String(item.Id||item.indice||'r'+Math.random()),
+    spId:   item.Id||item.id||null,
+    title:  item.Nome_Programa||item.Title||'Sem título',
+    client: item.Cliente||'',
+    status: item.Status_Programa||'',
+    source: 'sharepoint',
+    analysts,
+    phases,
+  };
+}
+
+// ─── Build SP PATCH/POST payload from internal project ────────────────────────
+function buildSPPayload(project) {
+  const payload = {};
+  for (let i=0; i<MAX_ANALYSTS; i++) {
+    payload[`Analista_${i+1}`] = project.analysts[i]||null;
+  }
+  PHASES.forEach(ph=>{
+    const phase = project.phases[ph.key]||{};
+    const total = totalPhasePct(phase);
+    payload[`Inicio_${ph.key}`]       = phase.start ? fmtDateForSP(phase.start) : null;
+    payload[`Fim_${ph.key}`]          = phase.end   ? fmtDateForSP(phase.end)   : null;
+    payload[`Analista_${ph.key}_PCT`] = pctToSP(total);   // sum of all analyst pcts → decimal
+  });
+  return payload;
+}
+
+// ─── Compute Allocations (day-weighted, per-analyst pct) ──────────────────────
+function computeAllocations(projects) {
+  const result = {};
+  projects.forEach(proj=>{
+    proj.analysts.forEach((analyst, idx)=>{
+      if (!analyst) return;
+      if (!result[analyst]) result[analyst]={};
+      PHASES.forEach(ph=>{
+        const phase = proj.phases[ph.key];
+        const pct   = phase?.pcts?.[idx]||0;
+        if (!phase?.start||!phase?.end||!pct) return;
+        const sMk = monthKey(parseSPDate(phase.start));
+        const eMk = monthKey(parseSPDate(phase.end));
+        if (!sMk||!eMk) return;
+        rangeMonths(sMk,eMk).forEach(mk=>{
+          const [y,m] = mk.split('-').map(Number);
+          const dim   = new Date(y,m,0).getDate();
+          const ov    = daysOverlapInMonth(phase.start,phase.end,mk);
+          result[analyst][mk] = (result[analyst][mk]||0) + pct*(ov/dim);
+        });
+      });
+    });
+  });
+  Object.values(result).forEach(a=>Object.keys(a).forEach(mk=>{a[mk]=Math.round(a[mk]);}));
+  return result;
+}
+
+// ─── Traffic Light ────────────────────────────────────────────────────────────
+function cellClass(v) { return !v?'cell-empty':v<=90?'cell-green':v<=100?'cell-yellow':'cell-red'; }
+function TrafficDot({pct}) {
+  const c = !pct?'bg-gray-200':pct<=90?'bg-green-500':pct<=100?'bg-yellow-400':'bg-red-500';
+  return <span className={`inline-block w-3 h-3 rounded-full ${c}`}/>;
+}
+
+// ─── Status Badge ─────────────────────────────────────────────────────────────
+function StatusBadge({status}) {
+  if (!status) return null;
+  const c = status.toLowerCase().includes('andamento')?'bg-blue-100 text-blue-700':
+            status.toLowerCase().includes('conclu')?'bg-green-100 text-green-700':
+            status.toLowerCase().includes('cancel')?'bg-red-100 text-red-700':'bg-slate-100 text-slate-600';
+  return <span className={`text-xs px-1.5 py-0.5 rounded font-medium ${c}`}>{status}</span>;
+}
+
+// ─── Local Storage (config only — project data lives in SP) ──────────────────
+function loadLocal() { try{return JSON.parse(localStorage.getItem(LS_KEY)||'{}')} catch{return {}} }
+function saveLocal(d) { try{localStorage.setItem(LS_KEY,JSON.stringify(d))} catch{} }
+
+// ─── MSAL ─────────────────────────────────────────────────────────────────────
+let _msalApp = null;
+function getMsalApp(clientId, tenantId) {
+  if (_msalApp) return _msalApp;
+  _msalApp = new msal.PublicClientApplication({
+    auth: {
+      clientId,
+      authority:`https://login.microsoftonline.com/${tenantId||'common'}`,
+      redirectUri: window.location.origin+window.location.pathname,
+    },
+    cache:{ cacheLocation:'sessionStorage', storeAuthStateInCookie:false },
+  });
+  return _msalApp;
+}
+async function acquireToken(clientId, tenantId) {
+  const app = getMsalApp(clientId, tenantId);
+  await app.initialize();
+  const accounts = app.getAllAccounts();
+  if (accounts.length===0) {
+    const res = await app.loginPopup({scopes:[SP_SCOPE]});
+    return {token:res.accessToken, user:res.account?.name||res.account?.username||'Usuário'};
+  }
+  try {
+    const res = await app.acquireTokenSilent({scopes:[SP_SCOPE], account:accounts[0]});
+    return {token:res.accessToken, user:accounts[0]?.name||accounts[0]?.username||'Usuário'};
+  } catch {
+    const res = await app.loginPopup({scopes:[SP_SCOPE]});
+    return {token:res.accessToken, user:res.account?.name||res.account?.username||'Usuário'};
+  }
+}
+async function signOutMsal(clientId, tenantId) {
+  try {
+    const app = getMsalApp(clientId, tenantId);
+    await app.initialize();
+    const account = app.getAllAccounts()[0];
+    if (account) await app.logoutPopup({account});
+  } catch {}
+  _msalApp = null;
+}
+
+// ─── SharePoint REST ──────────────────────────────────────────────────────────
+async function spFetch(token, url, opts={}) {
+  const res = await fetch(url, {
+    ...opts,
+    headers:{
+      'Authorization':`Bearer ${token}`,
+      'Accept':'application/json;odata=nometadata',
+      ...(opts.headers||{}),
+    },
+  });
+  if (!res.ok) { const t=await res.text().catch(()=>''); throw new Error(`SP ${res.status}: ${t.slice(0,200)}`); }
+  if (res.status===204) return null;
+  return res.json();
+}
+async function fetchSPList(token, siteUrl, listName) {
+  let items=[], url=`${siteUrl}/_api/web/lists/GetByTitle('${listName}')/items?$select=${SP_SELECT}&$top=200`;
+  while (url) {
+    const json = await spFetch(token, url);
+    items = items.concat(json.value||[]);
+    url = json['@odata.nextLink']||null;
+  }
+  return items;
+}
+async function patchSPItem(token, siteUrl, listName, spId, payload) {
+  await spFetch(token, `${siteUrl}/_api/web/lists/GetByTitle('${listName}')/items(${spId})`, {
+    method:'POST',
+    headers:{'Content-Type':'application/json;odata=verbose','X-HTTP-Method':'MERGE','If-Match':'*'},
+    body:JSON.stringify({'__metadata':{'type':SP_ENTITY},...payload}),
+  });
+}
+async function createSPItem(token, siteUrl, listName, payload) {
+  const res = await fetch(`${siteUrl}/_api/web/lists/GetByTitle('${listName}')/items`, {
+    method:'POST',
+    headers:{
+      'Authorization':`Bearer ${token}`,
+      'Accept':'application/json;odata=verbose',
+      'Content-Type':'application/json;odata=verbose',
+    },
+    body:JSON.stringify({'__metadata':{'type':SP_ENTITY},...payload}),
+  });
+  if (!res.ok) { const t=await res.text().catch(()=>''); throw new Error(`SP Create ${res.status}: ${t.slice(0,200)}`); }
+  const json = await res.json();
+  return json.d||json;
+}
+
+// ─── Dist File (alocacao_dist.json in SharePoint Documents) ──────────────────
+// Stores: per-analyst % breakdown + tool-only projects (not in List_Pulse)
+// {
+//   "distributions": { "spId": { "Etapa_1": [10,20], ... } },
+//   "localProjects": [ { full project object }, ... ]
+// }
+function _distFileUrl(siteUrl) {
+  const rel = new URL(siteUrl).pathname; // e.g. /personal/automacoes_fpa_...
+  return {
+    read:   `${siteUrl}/_api/web/GetFileByServerRelativeUrl('${rel}/Documents/alocacao_dist.json')/$value`,
+    write:  `${siteUrl}/_api/web/GetFolderByServerRelativeUrl('${rel}/Documents')/Files/add(url='alocacao_dist.json',overwrite=true)`,
+  };
+}
+async function fetchDistFile(token, siteUrl) {
+  try {
+    const {read} = _distFileUrl(siteUrl);
+    const res = await fetch(read, { headers:{'Authorization':`Bearer ${token}`,'Accept':'text/plain'} });
+    if (!res.ok) return {distributions:{},localProjects:[]};
+    const txt = await res.text();
+    return JSON.parse(txt);
+  } catch { return {distributions:{},localProjects:[]}; }
+}
+async function saveDistFile(token, siteUrl, data) {
+  const {write} = _distFileUrl(siteUrl);
+  const res = await fetch(write, {
+    method:'POST',
+    headers:{'Authorization':`Bearer ${token}`,'Content-Type':'application/octet-stream'},
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) { const t=await res.text().catch(()=>''); throw new Error(`Erro ao salvar arquivo: ${res.status} ${t.slice(0,150)}`); }
+}
+// Merge SP items + distribution file → complete project list
+function mergeProjectsWithDist(spItems, dist) {
+  const spProjects = spItems.map(item=>{
+    const proj = parseSPItem(item);
+    const saved = dist.distributions?.[String(proj.spId)];
+    if (!saved) return proj;
+    const phases={};
+    PHASES.forEach(ph=>{
+      const storedPcts = saved[ph.key];
+      const base = proj.phases[ph.key];
+      // Use stored pcts if length matches analyst count, otherwise equal-split fallback
+      phases[ph.key] = {
+        ...base,
+        pcts: storedPcts && storedPcts.length===proj.analysts.length ? storedPcts : base.pcts,
+      };
+    });
+    return {...proj, phases};
+  });
+  return [...spProjects, ...(dist.localProjects||[])];
+}
+
+// ─── App ──────────────────────────────────────────────────────────────────────
+function App() {
+  const local = loadLocal();
+  const [projects,   setProjects]   = useState([]);
+  const [authState,  setAuthState]  = useState({isAuth:false,user:'',token:''});
+  const [clientId,   setClientId]   = useState(APP_CONFIG.clientId||local.clientId||'');
+  const [tenantId,   setTenantId]   = useState(APP_CONFIG.tenantId||local.tenantId||'common');
+  const [loading,    setLoading]    = useState(false);
+  const [saving,     setSaving]     = useState(false);
+  const [error,      setError]      = useState('');
+  const [saveMsg,    setSaveMsg]    = useState(null);
+  const [view,       setView]       = useState('dashboard');
+  const [monthRange, setMonthRange] = useState(()=>{
+    const n=new Date();
+    const s=`${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}`;
+    const e=new Date(n.getFullYear()+1,n.getMonth(),1);
+    return {start:s, end:`${e.getFullYear()}-${String(e.getMonth()+1).padStart(2,'0')}`};
+  });
+  const [distData,         setDistData]         = useState({distributions:{},localProjects:[]});
+  const [showEdit,         setShowEdit]         = useState(null);   // project obj or 'new'
+  const [showAnalystDetail,setShowAnalystDetail] = useState(null);
+
+  // Only persist config locally when it wasn't baked into APP_CONFIG
+  useEffect(()=>{ if (!APP_CONFIG.clientId) saveLocal({clientId,tenantId}); },[clientId,tenantId]);
+
+  const allocations = useMemo(()=>computeAllocations(projects),[projects]);
+  const analysts    = useMemo(()=>Object.keys(allocations).sort(),[allocations]);
+  const months      = useMemo(()=>rangeMonths(monthRange.start,monthRange.end),[monthRange]);
+
+  // ── Load all data: SP items + dist file → merged projects ──
+  const loadAll = useCallback(async(token)=>{
+    setLoading(true); setError('');
+    try {
+      const [spItems, dist] = await Promise.all([
+        fetchSPList(token, SP_SITE_URL, SP_LIST_NAME),
+        fetchDistFile(token, SP_SITE_URL),
+      ]);
+      setDistData(dist);
+      setProjects(mergeProjectsWithDist(spItems, dist));
+    } catch(e) { setError('Erro ao carregar dados: '+e.message); }
+    finally { setLoading(false); }
+  },[]);
+
+  const signInAndFetch = useCallback(async()=>{
+    if (!clientId) { setError('⚙️ Client ID não configurado. Edite APP_CONFIG no início do arquivo.'); return; }
+    setLoading(true); setError('');
+    try {
+      const {token,user} = await acquireToken(clientId,tenantId);
+      setAuthState({isAuth:true,user,token});
+      await loadAll(token);
+    } catch(e) { setError('Erro: '+e.message); }
+    finally { setLoading(false); }
+  },[clientId,tenantId,loadAll]);
+
+  const signOut = useCallback(async()=>{
+    await signOutMsal(clientId,tenantId);
+    setAuthState({isAuth:false,user:'',token:''});
+    setProjects([]);
+    setDistData({distributions:{},localProjects:[]});
+  },[clientId,tenantId]);
+
+  // ── Save Project ──
+  // SP projects:    PATCH/POST List_Pulse  +  update distributions in dist file
+  // Local projects: save full project obj in dist file (shared via SP, no new SP columns)
+  const saveProject = useCallback(async(project)=>{
+    if (!authState.isAuth || !authState.token) {
+      // No auth: session-only (warn user)
+      if (project.spId) {
+        setProjects(prev=>prev.map(p=>p.id===project.id ? {...project} : p));
+      } else {
+        setProjects(prev=>[...prev, {...project, id:'local_'+Date.now(), source:'local'}]);
+      }
+      setSaveMsg({type:'warn',text:'⚠️ Salvo localmente nesta sessão. Conecte ao SharePoint para compartilhar.'});
+      setShowEdit(null);
+      setTimeout(()=>setSaveMsg(null),7000);
+      return;
+    }
+
+    setSaving(true); setSaveMsg(null);
+    try {
+      // Work on a mutable copy of distData
+      const newDist = {
+        distributions: {...(distData.distributions||{})},
+        localProjects:  [...(distData.localProjects||[])],
+      };
+
+      if (project.source==='sharepoint') {
+        // ── SP project ──
+        const payload = buildSPPayload(project);
+        if (project.spId) {
+          await patchSPItem(authState.token, SP_SITE_URL, SP_LIST_NAME, project.spId, payload);
+          setProjects(prev=>prev.map(p=>p.id===project.id ? {...project} : p));
+        } else {
+          const fullPayload = {
+            ...payload,
+            Title:project.title, Nome_Programa:project.title,
+            Cliente:project.client||'', Status_Programa:project.status||'',
+          };
+          const created = await createSPItem(authState.token, SP_SITE_URL, SP_LIST_NAME, fullPayload);
+          const newId   = created.Id||created.id;
+          const saved   = {...project, spId:newId, id:String(newId), source:'sharepoint'};
+          setProjects(prev=>[...prev, saved]);
+          project = saved; // update reference for dist save below
+        }
+        // Save per-analyst distribution for this SP project
+        const dist={};
+        PHASES.forEach(ph=>{ dist[ph.key]=project.phases[ph.key]?.pcts||[]; });
+        newDist.distributions[String(project.spId)] = dist;
+        setSaveMsg({type:'success', text:'✓ Salvo no SharePoint.'});
+
+      } else {
+        // ── Local / tool-only project → stored entirely in dist file ──
+        const finalId = project.id?.startsWith('proj_')||project.id?.startsWith('local_')
+          ? project.id : 'local_'+Date.now();
+        const localProj = {...project, id:finalId, spId:null, source:'local'};
+        const idx = newDist.localProjects.findIndex(p=>p.id===localProj.id);
+        if (idx>=0) {
+          newDist.localProjects[idx] = localProj;
+          setProjects(prev=>prev.map(p=>p.id===localProj.id ? localProj : p));
+        } else {
+          newDist.localProjects.push(localProj);
+          setProjects(prev=>[...prev, localProj]);
+        }
+        setSaveMsg({type:'success', text:'✓ Projeto salvo na ferramenta (visível para todos).'});
+      }
+
+      // Write updated dist file to SharePoint
+      await saveDistFile(authState.token, SP_SITE_URL, newDist);
+      setDistData(newDist);
+
+    } catch(e) {
+      setSaveMsg({type:'error', text:'Erro ao salvar: '+e.message});
+    } finally {
+      setSaving(false);
+      setShowEdit(null);
+      setTimeout(()=>setSaveMsg(null),5000);
+    }
+  },[authState, distData]);
+
+  // ── Suggestions ──
+  function getSuggestions(proj, phKey) {
+    const ph = proj.phases[phKey];
+    if (!ph?.start||!ph?.end) return [];
+    const mths = rangeMonths(monthKey(parseSPDate(ph.start)),monthKey(parseSPDate(ph.end)));
+    return analysts.filter(a=>!proj.analysts.includes(a))
+      .map(a=>({analyst:a, maxAlloc:Math.max(0,...mths.map(m=>allocations[a]?.[m]||0))}))
+      .map(s=>({...s, available:100-s.maxAlloc}))
+      .filter(s=>s.available>0).sort((a,b)=>b.available-a.available).slice(0,5);
+  }
+
+  // ── CSV Import ──
+  const importCSV = useCallback(file=>{
+    const reader = new FileReader();
+    reader.onload = e=>{
+      const text = e.target.result;
+      const firstLine = text.split('\n')[0]||'';
+      const delim = firstLine.split(';').length>firstLine.split(',').length?';':',';
+      Papa.parse(text,{header:true,skipEmptyLines:true,delimiter:delim,
+        complete:r=>{
+          if (r.errors.length&&!r.data.length) { setError('Erro CSV: '+r.errors[0].message); return; }
+          setProjects(r.data.map((row,i)=>parseSPItem({Id:row.Id||row.id||i+1,...row})));
+          setError('');
+        },
+        error:e=>setError('Erro CSV: '+e.message),
+      });
+    };
+    reader.readAsText(file,'UTF-8');
+  },[]);
+
+  // ── Not authenticated: show full-screen login ──
+  if (!authState.isAuth) {
+    return (
+      <LoginScreen
+        onSignIn={signInAndFetch}
+        onImportCSV={importCSV}
+        loading={loading}
+        error={error}
+        onClearError={()=>setError('')}
+        clientId={clientId}
+        setClientId={setClientId}
+        tenantId={tenantId}
+        setTenantId={setTenantId}
+        isConfigured={!!clientId}
+      />
+    );
+  }
+
+  // ── Authenticated: full app ──
+  function addAnalystToProject(proj, analyst) {
+    const updated={...proj,analysts:[...proj.analysts,analyst]};
+    PHASES.forEach(ph=>{
+      updated.phases={...updated.phases,[ph.key]:{...updated.phases[ph.key],pcts:[...(updated.phases[ph.key]?.pcts||[]),0]}};
+    });
+    setShowEdit(updated);
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50">
+      <AppHeader view={view} setView={setView} authState={authState}
+        onSignOut={signOut} projectCount={projects.length} loading={loading}
+        onRefresh={()=>loadAll(authState.token)}/>
+
+      {saveMsg&&(
+        <div className={`slide-down sticky top-0 z-40 text-center py-2 text-sm font-medium ${
+          saveMsg.type==='success'?'bg-emerald-600 text-white':
+          saveMsg.type==='error'?'bg-red-600 text-white':'bg-amber-500 text-white'}`}>
+          {saveMsg.text}
+        </div>
+      )}
+
+      <main className="max-w-screen-2xl mx-auto px-4 pb-10">
+        {error&&(
+          <div className="mt-3 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm flex items-start gap-2">
+            <span className="flex-1">{error}</span>
+            <button onClick={()=>setError('')} className="text-red-400 hover:text-red-600">✕</button>
+          </div>
+        )}
+        {view==='dashboard'&&(
+          <DashboardView analysts={analysts} allocations={allocations} months={months}
+            monthRange={monthRange} setMonthRange={setMonthRange} onAnalystClick={setShowAnalystDetail}/>
+        )}
+        {view==='monthly'&&(
+          <MonthlyGrid analysts={analysts} allocations={allocations} months={months}
+            monthRange={monthRange} setMonthRange={setMonthRange} onAnalystClick={setShowAnalystDetail}/>
+        )}
+        {view==='projects'&&(
+          <ProjectsView projects={projects} onEdit={p=>setShowEdit(p)} onNew={()=>setShowEdit('new')}
+            getSuggestions={getSuggestions} onAddAnalyst={addAnalystToProject}/>
+        )}
+        {view==='suggestions'&&(
+          <SuggestionsView projects={projects} getSuggestions={getSuggestions}
+            onEdit={p=>setShowEdit(p)} onAddAnalyst={addAnalystToProject}/>
+        )}
+      </main>
+
+      {showEdit&&(
+        <ProjectModal
+          project={showEdit==='new'?null:showEdit}
+          allAnalysts={analysts}
+          onSave={saveProject}
+          onClose={()=>setShowEdit(null)}
+          saving={saving}
+          isSpConnected={authState.isAuth}/>
+      )}
+      {showAnalystDetail&&(
+        <AnalystDetailModal analyst={showAnalystDetail} allProjects={projects}
+          onClose={()=>setShowAnalystDetail(null)}/>
+      )}
+    </div>
+  );
+}
+
+// ─── Header (only shown when authenticated) ───────────────────────────────────
+function AppHeader({view,setView,authState,onSignOut,projectCount,loading,onRefresh}) {
+  const navs=[
+    {k:'dashboard',  label:'📊 Dashboard'},
+    {k:'monthly',    label:'📅 Grade Mensal'},
+    {k:'projects',   label:'📁 Projetos'},
+    {k:'suggestions',label:'💡 Sugestões'},
+  ];
+  return (
+    <header className="bg-white border-b border-slate-200 shadow-sm mb-4 sticky top-0 z-30">
+      <div className="max-w-screen-2xl mx-auto px-4 py-2.5 flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-2 mr-1 shrink-0">
+          <div className="w-7 h-7 bg-indigo-600 rounded-lg flex items-center justify-center text-white text-xs font-bold">CT</div>
+          <span className="text-base font-bold text-slate-800">Alocação</span>
+          {projectCount>0&&<span className="bg-indigo-100 text-indigo-700 text-xs px-2 py-0.5 rounded-full">{projectCount} proj.</span>}
+        </div>
+        <nav className="flex gap-1 flex-wrap flex-1">
+          {navs.map(n=>(
+            <button key={n.k} onClick={()=>setView(n.k)}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${view===n.k?'bg-indigo-600 text-white':'text-slate-600 hover:bg-slate-100'}`}>
+              {n.label}
+            </button>
+          ))}
+        </nav>
+        <div className="flex items-center gap-2 ml-auto shrink-0">
+          <button onClick={onRefresh} disabled={loading} title="Atualizar dados do SharePoint"
+            className="text-xs text-slate-400 hover:text-indigo-600 border border-slate-200 hover:border-indigo-200 px-2.5 py-1.5 rounded-lg transition disabled:opacity-40">
+            {loading?'⏳':'🔄'}
+          </button>
+          <div className="flex items-center gap-2 border-l border-slate-200 pl-3">
+            <div className="text-right hidden sm:block">
+              <p className="text-xs font-medium text-slate-700 leading-tight">{authState.user}</p>
+              <p className="text-xs text-slate-400 leading-tight">Microsoft 365</p>
+            </div>
+            <button onClick={onSignOut}
+              className="text-xs text-slate-400 hover:text-red-500 border border-slate-200 hover:border-red-200 px-2.5 py-1.5 rounded-lg transition">
+              Sair
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+// ─── Login Screen (shown before authentication) ───────────────────────────────
+function LoginScreen({onSignIn,onImportCSV,loading,error,onClearError,clientId,setClientId,tenantId,setTenantId,isConfigured}) {
+  const fileRef  = useRef();
+  const [showAdmin, setShowAdmin] = useState(false);
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-slate-100 flex items-center justify-center p-4">
+      <div className="w-full max-w-sm">
+
+        {/* Logo / Brand */}
+        <div className="text-center mb-8">
+          <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center text-white text-2xl font-bold mx-auto mb-4 shadow-lg shadow-indigo-200">
+            CT
+          </div>
+          <h1 className="text-2xl font-bold text-slate-900">Alocação de Analistas</h1>
+          <p className="text-slate-500 mt-1 text-sm">Cia de Talentos</p>
+        </div>
+
+        {/* Main card */}
+        <div className="bg-white rounded-2xl shadow-xl border border-slate-100 overflow-hidden">
+
+          {/* Error banner */}
+          {error&&(
+            <div className="bg-red-50 border-b border-red-100 px-5 py-3 flex items-start gap-2">
+              <span className="text-red-600 text-sm flex-1">{error}</span>
+              <button onClick={onClearError} className="text-red-400 hover:text-red-600 shrink-0">✕</button>
+            </div>
+          )}
+
+          <div className="px-6 py-7 space-y-4">
+            {/* Microsoft Sign-in button */}
+            <button onClick={onSignIn} disabled={loading}
+              className="w-full flex items-center gap-3 bg-white hover:bg-slate-50 border-2 border-slate-200 hover:border-indigo-300 rounded-xl px-4 py-3.5 transition group disabled:opacity-60 disabled:cursor-not-allowed shadow-sm">
+              {/* Microsoft Logo SVG */}
+              <svg width="20" height="20" viewBox="0 0 21 21" className="shrink-0">
+                <rect x="1" y="1" width="9" height="9" fill="#f25022"/>
+                <rect x="11" y="1" width="9" height="9" fill="#7fba00"/>
+                <rect x="1" y="11" width="9" height="9" fill="#00a4ef"/>
+                <rect x="11" y="11" width="9" height="9" fill="#ffb900"/>
+              </svg>
+              <span className="text-sm font-semibold text-slate-700 group-hover:text-indigo-700 transition">
+                {loading ? 'Aguarde, conectando…' : 'Entrar com Microsoft 365'}
+              </span>
+              {loading&&<svg className="ml-auto animate-spin w-4 h-4 text-indigo-400" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>}
+            </button>
+
+            <p className="text-xs text-center text-slate-400">
+              Seus dados do SharePoint serão carregados automaticamente após o login.
+            </p>
+
+            {/* Divider */}
+            <div className="flex items-center gap-3">
+              <div className="flex-1 h-px bg-slate-100"/>
+              <span className="text-xs text-slate-400">ou</span>
+              <div className="flex-1 h-px bg-slate-100"/>
+            </div>
+
+            {/* CSV fallback */}
+            <button onClick={()=>fileRef.current.click()}
+              className="w-full flex items-center justify-center gap-2 text-sm text-slate-500 hover:text-slate-700 border border-slate-200 hover:border-slate-300 rounded-xl px-4 py-2.5 transition">
+              📄 Importar CSV da List_Pulse
+            </button>
+            <input ref={fileRef} type="file" accept=".csv" className="hidden"
+              onChange={e=>{if(e.target.files[0])onImportCSV(e.target.files[0]);}}/>
+          </div>
+        </div>
+
+        {/* Admin setup — collapsed by default, only shown when clientId is not configured */}
+        {!isConfigured&&(
+          <div className="mt-4">
+            <button onClick={()=>setShowAdmin(v=>!v)}
+              className="w-full text-xs text-slate-400 hover:text-slate-600 flex items-center justify-center gap-1.5 py-2 transition">
+              ⚙️ Configuração de administrador
+              <span className={`transition-transform ${showAdmin?'rotate-180':''}`}>▾</span>
+            </button>
+            {showAdmin&&(
+              <div className="mt-2 bg-white rounded-2xl border border-amber-200 p-5 space-y-3 shadow-sm">
+                <div className="flex items-start gap-2">
+                  <span className="text-amber-500 text-lg shrink-0">⚠️</span>
+                  <p className="text-xs text-amber-700">
+                    <strong>APP_CONFIG não preenchido.</strong> Edite o arquivo HTML, localize <code className="bg-amber-50 px-1 rounded">APP_CONFIG</code> no início e preencha o <code className="bg-amber-50 px-1 rounded">clientId</code>. Isso precisa ser feito <strong>uma vez</strong> pelo administrador.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Client ID (Application ID)</label>
+                    <input value={clientId} onChange={e=>setClientId(e.target.value)}
+                      placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-xs font-mono focus:ring-2 focus:ring-indigo-200"/>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-slate-600 mb-1">Tenant ID</label>
+                    <input value={tenantId} onChange={e=>setTenantId(e.target.value)}
+                      placeholder="common ou xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-xs font-mono focus:ring-2 focus:ring-indigo-200"/>
+                  </div>
+                </div>
+                <details>
+                  <summary className="text-xs text-indigo-600 cursor-pointer hover:text-indigo-800 font-medium">📋 Passos para registrar o app Azure AD</summary>
+                  <ol className="mt-2 space-y-1 text-xs text-slate-600 list-decimal list-inside leading-relaxed">
+                    <li><strong>portal.azure.com</strong> → Azure Active Directory → Registros de aplicativo → Novo registro</li>
+                    <li>Tipo de conta: <strong>Apenas esta organização</strong></li>
+                    <li>URI de redirecionamento: <strong>SPA</strong> → <code className="bg-slate-100 px-1 rounded">{window.location.origin+window.location.pathname}</code></li>
+                    <li>Copie o <strong>Application (client) ID</strong> e <strong>Directory (tenant) ID</strong></li>
+                    <li>Permissões de API → SharePoint → Delegadas → <strong>AllSites.ReadWrite</strong> → Consentimento admin</li>
+                    <li>Cole os IDs acima e preencha <code className="bg-slate-100 px-1 rounded">APP_CONFIG</code> no HTML</li>
+                    <li>Sirva via HTTP: <code className="bg-slate-100 px-1 rounded">python -m http.server 8080</code></li>
+                  </ol>
+                </details>
+              </div>
+            )}
+          </div>
+        )}
+
+        <p className="text-center text-xs text-slate-300 mt-6">
+          Cia de Talentos · Gestão de Alocação
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ─── Month Range Picker ───────────────────────────────────────────────────────
+function MonthRangePicker({monthRange,setMonthRange}) {
+  const n=new Date();
+  const cur=`${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}`;
+  const shortcuts=[
+    {label:'6m',fn:()=>{const e=new Date(n.getFullYear(),n.getMonth()+5,1);return{start:cur,end:`${e.getFullYear()}-${String(e.getMonth()+1).padStart(2,'0')}`};}},
+    {label:'12m',fn:()=>{const e=new Date(n.getFullYear()+1,n.getMonth(),1);return{start:cur,end:`${e.getFullYear()}-${String(e.getMonth()+1).padStart(2,'0')}`};}},
+    {label:'2025–26',fn:()=>({start:'2025-01',end:'2026-12'})},
+  ];
+  return (
+    <div className="flex items-center gap-2 flex-wrap">
+      <div className="flex items-center gap-1.5 bg-slate-100 rounded-lg px-2.5 py-1.5">
+        <span className="text-slate-500 text-xs font-medium">Visualizando:</span>
+        <input type="month" value={monthRange.start} onChange={e=>setMonthRange(p=>({...p,start:e.target.value}))}
+          className="bg-transparent border-0 text-xs text-slate-700 focus:outline-none cursor-pointer"/>
+        <span className="text-slate-400 text-xs">→</span>
+        <input type="month" value={monthRange.end} onChange={e=>setMonthRange(p=>({...p,end:e.target.value}))}
+          className="bg-transparent border-0 text-xs text-slate-700 focus:outline-none cursor-pointer"/>
+      </div>
+      <div className="flex gap-1">
+        {shortcuts.map(s=>(
+          <button key={s.label} onClick={()=>setMonthRange(s.fn())}
+            className="text-xs px-2 py-1 rounded-md bg-white border border-slate-200 text-slate-600 hover:bg-indigo-50 hover:text-indigo-700 transition">
+            {s.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── Dashboard View ───────────────────────────────────────────────────────────
+function DashboardView({analysts,allocations,months,monthRange,setMonthRange,onAnalystClick}) {
+  if (analysts.length===0) return (
+    <div className="mt-10 text-center text-slate-400">
+      <p className="text-4xl mb-3">📊</p>
+      <p className="text-lg font-medium">Nenhum dado carregado</p>
+      <p className="text-sm mt-1">Conecte ao SharePoint ou importe um CSV.</p>
+    </div>
+  );
+  return (
+    <div className="fade-in mt-4 space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <h2 className="text-lg font-bold text-slate-800">Dashboard de Alocação</h2>
+        <MonthRangePicker monthRange={monthRange} setMonthRange={setMonthRange}/>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+        {analysts.map(analyst=>{
+          const vals = months.map(m=>allocations[analyst]?.[m]||0);
+          const max  = Math.max(...vals,0);
+          return (
+            <button key={analyst} onClick={()=>onAnalystClick(analyst)}
+              className="bg-white rounded-xl border border-slate-200 p-4 text-left hover:border-indigo-300 hover:shadow-md transition group">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-semibold text-slate-800 group-hover:text-indigo-700 truncate">{analyst}</span>
+                <TrafficDot pct={max}/>
+              </div>
+              <p className={`text-2xl font-bold ${max>100?'text-red-600':max>90?'text-yellow-600':'text-green-600'}`}>{max}%</p>
+              <p className="text-xs text-slate-400 mt-0.5">pico no período</p>
+              <div className="mt-2 flex gap-0.5 h-1.5">
+                {months.slice(0,12).map(m=>{
+                  const v=allocations[analyst]?.[m]||0;
+                  return <div key={m} className={`flex-1 rounded-sm ${v>100?'bg-red-400':v>90?'bg-yellow-400':v>0?'bg-green-400':'bg-slate-100'}`}/>;
+                })}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Monthly Grid ─────────────────────────────────────────────────────────────
+function MonthlyGrid({analysts,allocations,months,monthRange,setMonthRange,onAnalystClick}) {
+  if (analysts.length===0) return (
+    <div className="mt-10 text-center text-slate-400">
+      <p className="text-4xl mb-3">📅</p>
+      <p className="text-lg font-medium">Nenhum dado carregado</p>
+      <p className="text-sm mt-1">Conecte ao SharePoint ou importe um CSV.</p>
+    </div>
+  );
+  return (
+    <div className="fade-in mt-4 space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <h2 className="text-lg font-bold text-slate-800">Grade Mensal de Alocação</h2>
+        <MonthRangePicker monthRange={monthRange} setMonthRange={setMonthRange}/>
+      </div>
+      <div className="scroll-table bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <table className="min-w-full text-sm border-collapse">
+          <thead>
+            <tr className="bg-slate-50 border-b border-slate-200">
+              <th className="sticky left-0 bg-slate-50 px-4 py-3 text-left text-xs font-semibold text-slate-600 min-w-40 z-20">Analista</th>
+              {months.map(m=>(
+                <th key={m} className="px-2 py-3 text-center text-xs font-medium text-slate-500 whitespace-nowrap min-w-16">{monthLabel(m)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100">
+            {analysts.map(analyst=>(
+              <tr key={analyst} className="hover:bg-slate-50 transition">
+                <td className="sticky left-0 bg-white hover:bg-slate-50 px-4 py-2.5 font-medium text-slate-800">
+                  <button onClick={()=>onAnalystClick(analyst)} className="hover:text-indigo-600 transition text-left w-full truncate">
+                    {analyst}
+                  </button>
+                </td>
+                {months.map(m=>{
+                  const v = allocations[analyst]?.[m]||0;
+                  return (
+                    <td key={m} className={`px-1 py-2 text-center text-xs font-semibold rounded-sm ${cellClass(v)}`}>
+                      {v>0?v+'%':''}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex items-center gap-4 text-xs text-slate-500">
+        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-green-200 inline-block"/>≤90%</span>
+        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-yellow-200 inline-block"/>90–100%</span>
+        <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-red-200 inline-block"/>&gt;100%</span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Projects View ────────────────────────────────────────────────────────────
+function ProjectsView({projects,onEdit,onNew,getSuggestions,onAddAnalyst}) {
+  const [search,  setSearch]  = useState('');
+  const [showSug, setShowSug] = useState(null);
+
+  const filtered = projects.filter(p=>
+    p.title.toLowerCase().includes(search.toLowerCase())||
+    p.client.toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div className="fade-in mt-4 space-y-4">
+      <div className="flex items-center gap-3 flex-wrap">
+        <h2 className="text-lg font-bold text-slate-800">Projetos</h2>
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar projeto..."
+          className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm flex-1 min-w-48 focus:ring-2 focus:ring-indigo-200"/>
+        <button onClick={onNew}
+          className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-4 py-2 rounded-lg font-medium flex items-center gap-1.5">
+          + Novo Projeto
+        </button>
+      </div>
+
+      {filtered.length===0&&(
+        <div className="text-center text-slate-400 py-12">
+          <p className="text-3xl mb-2">📁</p>
+          <p>{projects.length===0?'Nenhum projeto carregado.':'Nenhum projeto encontrado.'}</p>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {filtered.map(proj=>{
+          const hasPhases = PHASES.some(ph=>proj.phases[ph.key]?.start);
+          return (
+            <div key={proj.id} className="bg-white rounded-xl border border-slate-200 overflow-hidden hover:border-indigo-200 transition">
+              <div className="px-4 py-3 flex items-start gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-semibold text-slate-800 truncate">{proj.title}</span>
+                    {proj.client&&<span className="text-xs text-slate-500">{proj.client}</span>}
+                    <StatusBadge status={proj.status}/>
+                    {proj.source==='sharepoint'&&<span className="text-xs bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded">SP</span>}
+                    {proj.source==='local'&&<span className="text-xs bg-amber-50 text-amber-600 px-1.5 py-0.5 rounded">Local</span>}
+                  </div>
+                  <div className="mt-1 flex items-center gap-2 text-xs text-slate-500 flex-wrap">
+                    <span>{proj.analysts.length>0?proj.analysts.join(', '):'Sem analistas'}</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={()=>setShowSug(showSug===proj.id?null:proj.id)}
+                    className="text-xs text-indigo-600 hover:text-indigo-800 border border-indigo-200 px-2 py-1 rounded-lg">💡</button>
+                  <button onClick={()=>onEdit(proj)}
+                    className="text-xs text-slate-600 hover:text-slate-800 border border-slate-200 px-3 py-1 rounded-lg">Editar</button>
+                </div>
+              </div>
+
+              {/* Phase summary */}
+              {hasPhases&&(
+                <div className="border-t border-slate-100 px-4 py-2 overflow-x-auto">
+                  <div className="flex gap-3 min-w-max text-xs">
+                    {PHASES.filter(ph=>proj.phases[ph.key]?.start).map(ph=>{
+                      const phase = proj.phases[ph.key];
+                      const total = totalPhasePct(phase);
+                      return (
+                        <div key={ph.key} className="text-center">
+                          <p className="text-slate-400 mb-0.5">{ph.label}</p>
+                          <p className="text-slate-600">{fmtDateDisplay(phase.start)}</p>
+                          <p className="text-slate-600">→ {fmtDateDisplay(phase.end)}</p>
+                          {total>0&&<p className={`mt-0.5 font-semibold ${total>100?'text-red-600':total>90?'text-yellow-600':'text-green-600'}`}>{total}%</p>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Suggestions panel */}
+              {showSug===proj.id&&(
+                <div className="border-t border-slate-100 bg-indigo-50/40 px-4 py-3">
+                  <p className="text-xs font-semibold text-indigo-700 mb-2">💡 Sugestões de analistas disponíveis:</p>
+                  {PHASES.filter(ph=>proj.phases[ph.key]?.start).map(ph=>{
+                    const sugs = getSuggestions(proj, ph.key);
+                    if (sugs.length===0) return null;
+                    return (
+                      <div key={ph.key} className="mb-2">
+                        <p className="text-xs text-slate-500 mb-1">{ph.label}</p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {sugs.map(s=>(
+                            <button key={s.analyst} onClick={()=>{onAddAnalyst(proj,s.analyst);setShowSug(null);}}
+                              className="text-xs bg-white border border-indigo-200 text-indigo-700 px-2.5 py-1 rounded-lg hover:bg-indigo-100 transition">
+                              {s.analyst} <span className="text-indigo-400">{s.available}% livre</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Suggestions View ─────────────────────────────────────────────────────────
+function SuggestionsView({projects,getSuggestions,onEdit,onAddAnalyst}) {
+  const unallocated = projects.filter(p=>p.analysts.length===0||PHASES.some(ph=>p.phases[ph.key]?.start&&p.analysts.length<2));
+  if (unallocated.length===0) return (
+    <div className="mt-10 text-center text-slate-400">
+      <p className="text-3xl mb-2">✅</p>
+      <p>Todos os projetos têm analistas alocados.</p>
+    </div>
+  );
+  return (
+    <div className="fade-in mt-4 space-y-4">
+      <h2 className="text-lg font-bold text-slate-800">Sugestões de Alocação</h2>
+      {unallocated.map(proj=>(
+        <div key={proj.id} className="bg-white rounded-xl border border-slate-200 p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="font-semibold text-slate-800">{proj.title}</span>
+            {proj.client&&<span className="text-xs text-slate-400">{proj.client}</span>}
+            <StatusBadge status={proj.status}/>
+            <button onClick={()=>onEdit(proj)} className="ml-auto text-xs border border-slate-200 text-slate-600 px-3 py-1 rounded-lg hover:bg-slate-50">Editar</button>
+          </div>
+          {proj.analysts.length>0&&<p className="text-xs text-slate-500 mb-2">Alocados: {proj.analysts.join(', ')}</p>}
+          {PHASES.filter(ph=>proj.phases[ph.key]?.start).map(ph=>{
+            const sugs = getSuggestions(proj, ph.key);
+            if (sugs.length===0) return null;
+            return (
+              <div key={ph.key} className="mb-3">
+                <p className="text-xs font-medium text-slate-600 mb-1.5">{ph.label}</p>
+                <div className="flex flex-wrap gap-2">
+                  {sugs.map(s=>(
+                    <button key={s.analyst} onClick={()=>onAddAnalyst(proj,s.analyst)}
+                      className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-1.5 text-xs hover:bg-indigo-100 transition">
+                      <TrafficDot pct={s.maxAlloc}/>
+                      <span className="font-medium text-indigo-800">{s.analyst}</span>
+                      <span className="text-indigo-500">{s.available}% disponível</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Project Modal (redesigned — per-analyst % per phase) ─────────────────────
+function ProjectModal({project, allAnalysts, onSave, onClose, saving, isSpConnected}) {
+  const isExistingSP = !!(project?.spId);       // already in List_Pulse
+  const isExistingLocal = project && !project?.spId; // tool-only project being edited
+  // For new projects: default to SP if connected; user can toggle off
+  const [syncToSP, setSyncToSP] = useState(isExistingSP ? true : (isSpConnected && !isExistingLocal));
+
+  const [title,    setTitle]    = useState(project?.title||'');
+  const [client,   setClient]   = useState(project?.client||'');
+  const [status,   setStatus]   = useState(project?.status||'');
+  const [analysts, setAnalysts] = useState(project?.analysts ? [...project.analysts] : []);
+  const [phases,   setPhases]   = useState(()=>{
+    const p={};
+    PHASES.forEach(ph=>{
+      const ex = project?.phases?.[ph.key];
+      p[ph.key] = {
+        start: fmtDateForInput(ex?.start)||'',
+        end:   fmtDateForInput(ex?.end)||'',
+        pcts:  ex?.pcts ? [...ex.pcts] : [],
+      };
+    });
+    return p;
+  });
+
+  // Keep pcts arrays in sync when analysts list changes
+  function syncPctsLength(newAnalysts, prevPhases) {
+    const updated={};
+    PHASES.forEach(ph=>{
+      const cur = prevPhases[ph.key].pcts||[];
+      updated[ph.key] = {...prevPhases[ph.key], pcts: newAnalysts.map((_,i)=>cur[i]||0)};
+    });
+    return updated;
+  }
+
+  function addAnalyst() {
+    const newA = [...analysts,''];
+    setAnalysts(newA);
+    setPhases(prev=>syncPctsLength(newA,prev));
+  }
+  function removeAnalyst(idx) {
+    const newA = analysts.filter((_,i)=>i!==idx);
+    setAnalysts(newA);
+    setPhases(prev=>{
+      const updated={};
+      PHASES.forEach(ph=>{
+        const pcts=[...prev[ph.key].pcts];
+        pcts.splice(idx,1);
+        updated[ph.key]={...prev[ph.key],pcts};
+      });
+      return updated;
+    });
+  }
+  function updateAnalystName(idx,name) {
+    setAnalysts(prev=>prev.map((a,i)=>i===idx?name:a));
+  }
+  function updatePhaseField(phKey,field,val) {
+    setPhases(prev=>({...prev,[phKey]:{...prev[phKey],[field]:val}}));
+  }
+  function updatePct(phKey,idx,val) {
+    setPhases(prev=>{
+      const pcts=[...prev[phKey].pcts];
+      pcts[idx]=Math.max(0,parseFloat(val)||0);
+      return {...prev,[phKey]:{...prev[phKey],pcts}};
+    });
+  }
+
+  function handleSave() {
+    if (!title.trim()) return;
+    const filteredA = analysts.filter(a=>a.trim());
+    // Remove pcts for empty analyst rows
+    const filteredPhases={};
+    PHASES.forEach(ph=>{
+      const pcts = analysts.map((a,i)=>a.trim()?phases[ph.key].pcts[i]||0:null).filter(p=>p!==null);
+      filteredPhases[ph.key]={...phases[ph.key], pcts};
+    });
+    // source: 'sharepoint' → goes to List_Pulse + dist file
+    //         'local'      → goes to dist file only (shared via SP JSON)
+    const source = isExistingSP ? 'sharepoint'
+                 : (syncToSP && isSpConnected ? 'sharepoint' : 'local');
+    onSave({
+      id:     project?.id||'proj_'+Date.now(),
+      spId:   project?.spId||null,
+      title:  title.trim(),
+      client: client.trim(),
+      status,
+      source,
+      analysts: filteredA,
+      phases:   filteredPhases,
+    });
+  }
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] flex flex-col mx-4"
+        onClick={e=>e.stopPropagation()}>
+
+        {/* Sticky header */}
+        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between shrink-0 rounded-t-2xl">
+          <div>
+            <h2 className="text-lg font-bold text-slate-800">{project?'Editar Projeto':'Novo Projeto'}</h2>
+            <p className="text-xs text-slate-400 mt-0.5">
+              {isExistingSP ? '📋 Projeto do SharePoint — alterações sincronizam automaticamente'
+               : isExistingLocal ? '🗂️ Projeto da ferramenta — salvo no arquivo compartilhado'
+               : isSpConnected ? 'Novo projeto' : '⚠️ Sem conexão — salvo apenas nesta sessão'}
+            </p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-red-500 text-xl w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100">✕</button>
+        </div>
+
+        {/* Scrollable body */}
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
+
+          {/* ── Informações Gerais ── */}
+          <section>
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Informações Gerais</h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-medium text-slate-600 mb-1">Nome do Programa *</label>
+                <input value={title} onChange={e=>setTitle(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-200"
+                  placeholder="Ex: BASF — Trainee 2026"/>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Cliente</label>
+                <input value={client} onChange={e=>setClient(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-200"/>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Status</label>
+                <select value={status} onChange={e=>setStatus(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-indigo-200">
+                  <option value="">—</option>
+                  <option value="Em andamento">Em andamento</option>
+                  <option value="Concluído">Concluído</option>
+                  <option value="Cancelado">Cancelado</option>
+                  <option value="Planejamento">Planejamento</option>
+                </select>
+              </div>
+            </div>
+          </section>
+
+          {/* ── Analistas ── */}
+          <section>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Analistas Alocados</h3>
+              <button onClick={addAnalyst}
+                className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold border border-indigo-200 px-2.5 py-1 rounded-lg hover:bg-indigo-50 transition">
+                + Adicionar Analista
+              </button>
+            </div>
+            {analysts.length===0?(
+              <p className="text-slate-400 text-sm italic py-2">Nenhum analista adicionado. Use o botão acima.</p>
+            ):(
+              <div className="space-y-2">
+                {analysts.map((a,idx)=>(
+                  <div key={idx} className="flex items-center gap-2">
+                    <span className="text-xs text-slate-400 w-24 shrink-0">Analista {idx+1}</span>
+                    <input value={a} onChange={e=>updateAnalystName(idx,e.target.value)}
+                      list="analystDatalist"
+                      className="flex-1 border border-slate-300 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-indigo-200"
+                      placeholder="Nome do analista"/>
+                    <button onClick={()=>removeAnalyst(idx)}
+                      className="w-7 h-7 flex items-center justify-center text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-full transition text-lg leading-none shrink-0">
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <datalist id="analystDatalist">
+              {allAnalysts.map(a=><option key={a} value={a}/>)}
+            </datalist>
+          </section>
+
+          {/* ── Fases e Alocação ── */}
+          <section>
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-3">Fases e Percentuais</h3>
+            <div className="space-y-2">
+              {PHASES.map(ph=>{
+                const phase = phases[ph.key];
+                const total = totalPhasePct(phase);
+                const hasDate = phase.start||phase.end;
+                return (
+                  <div key={ph.key} className="border border-slate-200 rounded-xl overflow-hidden">
+                    {/* Phase header row */}
+                    <div className="bg-slate-50 px-4 py-2.5 flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-semibold text-slate-700 w-36 shrink-0">{ph.label}</span>
+                      <div className="flex items-center gap-1.5">
+                        <input type="date" value={phase.start} onChange={e=>updatePhaseField(ph.key,'start',e.target.value)}
+                          className="border border-slate-200 rounded-lg px-2 py-1 text-xs focus:ring-1 focus:ring-indigo-300"/>
+                        <span className="text-slate-300 text-xs">→</span>
+                        <input type="date" value={phase.end} onChange={e=>updatePhaseField(ph.key,'end',e.target.value)}
+                          className="border border-slate-200 rounded-lg px-2 py-1 text-xs focus:ring-1 focus:ring-indigo-300"/>
+                      </div>
+                      {total>0&&(
+                        <span className={`ml-auto text-xs font-bold px-2 py-0.5 rounded-full ${
+                          total>100?'bg-red-100 text-red-700':total>90?'bg-yellow-100 text-yellow-700':'bg-green-100 text-green-700'}`}>
+                          Total: {Math.round(total)}%
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Per-analyst pct rows */}
+                    {analysts.length>0?(
+                      <div className="divide-y divide-slate-50">
+                        {analysts.map((a,idx)=>(
+                          <div key={idx} className="flex items-center gap-3 px-4 py-2">
+                            <span className="text-xs text-slate-500 flex-1 truncate">{a||`Analista ${idx+1}`}</span>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <input type="number" min={0} max={200} step={5}
+                                value={phase.pcts[idx]!==undefined?phase.pcts[idx]:''}
+                                onChange={e=>updatePct(ph.key,idx,e.target.value)}
+                                className="border border-slate-200 rounded-lg px-2 py-1 text-xs w-20 text-right focus:ring-1 focus:ring-indigo-300"
+                                placeholder="0"/>
+                              <span className="text-xs text-slate-400 w-4">%</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ):(
+                      <p className="px-4 py-2 text-xs text-slate-400 italic">Adicione analistas acima para definir % por pessoa e fase.</p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+
+        {/* Sticky footer */}
+        <div className="px-6 py-4 border-t border-slate-200 flex items-center justify-between gap-3 shrink-0 rounded-b-2xl bg-white flex-wrap">
+          {/* SP sync toggle — only for NEW projects when SP connected */}
+          {!isExistingSP && !isExistingLocal && isSpConnected ? (
+            <label className="flex items-center gap-2 cursor-pointer select-none">
+              <div onClick={()=>setSyncToSP(v=>!v)}
+                className={`relative w-9 h-5 rounded-full transition ${syncToSP?'bg-indigo-600':'bg-slate-300'}`}>
+                <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${syncToSP?'translate-x-4':'translate-x-0.5'}`}/>
+              </div>
+              <span className="text-xs text-slate-600">
+                {syncToSP ? '📋 Adicionar ao SharePoint (List_Pulse)' : '🗂️ Salvar apenas na ferramenta'}
+              </span>
+            </label>
+          ) : (
+            <p className="text-xs text-slate-400">
+              {isExistingSP ? '💾 Salva no SharePoint + distribução no arquivo'
+               : isExistingLocal ? '🗂️ Salva no arquivo compartilhado (alocacao_dist.json)'
+               : '⚠️ Sem conexão — visível só nesta sessão'}
+            </p>
+          )}
+          <div className="flex gap-2 ml-auto">
+            <button onClick={onClose} className="border border-slate-300 text-slate-600 px-4 py-2 rounded-lg text-sm hover:bg-slate-50 transition">
+              Cancelar
+            </button>
+            <button onClick={handleSave} disabled={!title.trim()||saving}
+              className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white px-5 py-2 rounded-lg text-sm font-semibold transition flex items-center gap-2">
+              {saving?'⏳ Salvando...':(project?'💾 Salvar':'➕ Criar Projeto')}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Analyst Detail Modal ─────────────────────────────────────────────────────
+function AnalystDetailModal({analyst,allProjects,onClose}) {
+  const projs = allProjects.filter(p=>p.analysts.includes(analyst));
+  const grouped = projs.map(proj=>{
+    const idx = proj.analysts.indexOf(analyst);
+    const phases = PHASES.map(ph=>({
+      ...ph,
+      phase: proj.phases[ph.key],
+      pct:   proj.phases[ph.key]?.pcts?.[idx]||0,
+    })).filter(ph=>ph.phase?.start&&ph.phase?.end&&ph.pct>0);
+    return {proj,phases};
+  }).filter(g=>g.phases.length>0);
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] overflow-y-auto mx-4" onClick={e=>e.stopPropagation()}>
+        <div className="sticky top-0 bg-white border-b border-slate-100 px-6 py-4 flex items-center justify-between rounded-t-2xl">
+          <div>
+            <h2 className="text-lg font-bold text-slate-800">{analyst}</h2>
+            <p className="text-xs text-slate-400">{grouped.length} projeto(s) com alocação ativa</p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-xl w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-100">✕</button>
+        </div>
+        <div className="px-6 py-4 space-y-4">
+          {grouped.length===0&&<p className="text-slate-400 text-sm italic py-8 text-center">Nenhuma fase com datas e % preenchidos.</p>}
+          {grouped.map(({proj,phases})=>(
+            <div key={proj.id} className="border border-slate-200 rounded-xl overflow-hidden">
+              <div className="bg-slate-50 px-4 py-2.5 flex items-center gap-2">
+                <span className="font-semibold text-slate-700 text-sm truncate flex-1">{proj.title}</span>
+                {proj.client&&<span className="text-xs text-slate-400">{proj.client}</span>}
+                <StatusBadge status={proj.status}/>
+              </div>
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="border-t border-slate-100 bg-slate-50/50">
+                    <th className="px-4 py-1.5 text-left text-slate-500 font-medium">Fase</th>
+                    <th className="px-3 py-1.5 text-slate-500 font-medium text-center">Início</th>
+                    <th className="px-3 py-1.5 text-slate-500 font-medium text-center">Fim</th>
+                    <th className="px-3 py-1.5 text-slate-500 font-medium text-center">% Analista</th>
+                    <th className="px-3 py-1.5 text-slate-500 font-medium text-center">Período</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {phases.map(({key,label,phase,pct})=>{
+                    const s=parseSPDate(phase.start), e=parseSPDate(phase.end);
+                    const mRange=s&&e?`${monthLabel(monthKey(s))} → ${monthLabel(monthKey(e))}`:'';
+                    return (
+                      <tr key={key} className="border-t border-slate-50 hover:bg-indigo-50/30">
+                        <td className="px-4 py-2 font-medium text-slate-700">{label}</td>
+                        <td className="px-3 py-2 text-slate-500 text-center">{fmtDateDisplay(phase.start)}</td>
+                        <td className="px-3 py-2 text-slate-500 text-center">{fmtDateDisplay(phase.end)}</td>
+                        <td className="px-3 py-2 text-center">
+                          <span className={`font-bold px-2 py-0.5 rounded ${pct>100?'text-red-700 bg-red-50':pct>90?'text-yellow-700 bg-yellow-50':'text-green-700 bg-green-50'}`}>
+                            {pct}%
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 text-slate-400 text-center">{mRange}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Bootstrap ────────────────────────────────────────────────────────────────
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
